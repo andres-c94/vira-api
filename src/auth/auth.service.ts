@@ -53,16 +53,16 @@ export class AuthService {
   }
 
   private buildAuthResponse(user: User): { accessToken: string; user: Omit<User, 'passwordHash' | 'createdAt' | 'updatedAt'> } {
-    const accessToken = this.jwtService.sign({ sub: user.id, email: user.email });
+    const {
+      passwordHash,
+      createdAt,
+      updatedAt,
+      ...safeUser
+    } = user;
+
     return {
-      accessToken,
-      user: {
-        id: user.id,
-        email: user.email,
-        timezone: user.timezone,
-        reminderEnabled: user.reminderEnabled,
-        reminderTime: user.reminderTime
-      }
+      accessToken: this.jwtService.sign({ sub: user.id, email: user.email }),
+      user: safeUser
     };
   }
 }
