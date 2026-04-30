@@ -1,0 +1,293 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum ProgramStatus {
+  ACTIVE
+  COMPLETED
+}
+
+enum MissionStatus {
+  COMPLETED
+  FAILED
+}
+
+enum StructuralDifficulty {
+  EASY
+  MEDIUM
+  HARD
+}
+
+enum FailureReason {
+  SYSTEM_TIMEOUT
+  NO_TIME
+  FORGOT
+  NO_MOTIVATION
+  TOO_DIFFICULT
+  OTHER
+}
+
+enum Mood {
+  BAD
+  NORMAL
+  GOOD
+}
+
+enum AnalyticsEventType {
+  PROGRAM_STARTED
+  DAY_OPENED
+  MISSION_COMPLETED
+  MISSION_FAILED
+  PROGRAM_INTEREST_REGISTERED
+}
+
+enum ProgramAccessType {
+  FREE
+  LOCKED_BETA
+  PAID
+}
+
+enum LeaderboardTodayStatus {
+  COMPLETED_TODAY
+  PENDING_TODAY
+  FAILED_TODAY
+  INACTIVE_TODAY
+  PROGRAM_COMPLETED
+}
+
+enum ImpulseBlockStatus {
+  ACTIVE
+  COMPLETED
+  MISSED
+}
+
+enum ImpulseActionStatus {
+  AVAILABLE
+  COMPLETED
+}
+
+enum SuggestionType {
+  IDEA
+  PROBLEM
+  IMPROVEMENT
+  OTHER
+}
+
+enum SuggestionStatus {
+  NEW
+  REVIEWED
+  DISCARDED
+}
+
+model User {
+  id                      String         @id @default(uuid()) @db.Uuid
+  email                   String         @unique
+  passwordHash            String
+  timezone                String?
+  reminderEnabled         Boolean        @default(false)
+  reminderTime            String?
+  globalLeaderboardOptIn  Boolean        @default(false)
+  displayName             String?
+  createdAt               DateTime       @default(now())
+  updatedAt               DateTime       @updatedAt
+  userPrograms            UserProgram[]
+  analyticsEvents         AnalyticsEvent[]
+  interests               ProgramInterest[]
+  impulseBlocks           ImpulseBlock[]
+  suggestions             UserSuggestion[]
+}
+
+model Program {
+  id               String          @id @default(uuid()) @db.Uuid
+  slug             String          @unique
+  title            String
+  description      String
+  totalDays        Int
+  accessType       ProgramAccessType @default(FREE)
+  betaInterestCount Int           @default(0)
+  isActive         Boolean         @default(true)
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+  missions         ProgramMission[]
+  userPrograms     UserProgram[]
+  analyticsEvents  AnalyticsEvent[]
+  interests        ProgramInterest[]
+  impulseBlocks    ImpulseBlock[]
+}
+
+model ProgramMission {
+  id                  String               @id @default(uuid()) @db.Uuid
+  programId           String               @db.Uuid
+  dayNumber           Int
+  title               String
+  description         String
+  structuralDifficulty StructuralDifficulty
+  xpReward            Int
+  orderIndex          Int
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+  program             Program              @relation(fields: [programId], references: [id], onDelete: Cascade)
+  missionExecutions   MissionExecution[]
+  analyticsEvents     AnalyticsEvent[]
+
+  @@unique([programId, dayNumber])
+}
+
+model UserProgram {
+  id                String           @id @default(uuid()) @db.Uuid
+  userId            String           @db.Uuid
+  programId         String           @db.Uuid
+  startedAt         DateTime
+  completedAt       DateTime?
+  status            ProgramStatus    @default(ACTIVE)
+  currentProgramDay Int              @default(1)
+  currentStreak     Int              @default(0)
+  totalXP           Int              @default(0)
+  level             Int              @default(1)
+  lockedTimezone    String
+  lastSyncedAt      DateTime?
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+  user              User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  program           Program          @relation(fields: [programId], references: [id], onDelete: Cascade)
+  missionExecutions MissionExecution[]
+  moods             DailyMood[]
+  analyticsEvents   AnalyticsEvent[]
+  impulseBlocks     ImpulseBlock[]
+
+  @@index([userId, status])
+  @@index([userId, programId, status])
+}
+
+model MissionExecution {
+  id                 String         @id @default(uuid()) @db.Uuid
+  userProgramId      String         @db.Uuid
+  programMissionId   String         @db.Uuid
+  programDay         Int
+  localDate          String
+  status             MissionStatus
+  failureReason      FailureReason?
+  isAutoFailed       Boolean        @default(false)
+  durationMinutes    Int?
+  difficultyRating   Int?
+  socialMediaMinutes Int?
+  reflection         String?
+  completedAt        DateTime?
+  failedAt           DateTime?
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
+  userProgram        UserProgram    @relation(fields: [userProgramId], references: [id], onDelete: Cascade)
+  programMission     ProgramMission @relation(fields: [programMissionId], references: [id], onDelete: Cascade)
+
+  @@unique([userProgramId, programDay])
+  @@unique([userProgramId, programMissionId])
+  @@index([userProgramId, status])
+}
+
+model DailyMood {
+  id            String      @id @default(uuid()) @db.Uuid
+  userProgramId String      @db.Uuid
+  programDay    Int
+  localDate     String
+  mood          Mood
+  recordedAt    DateTime
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+  userProgram   UserProgram @relation(fields: [userProgramId], references: [id], onDelete: Cascade)
+
+  @@unique([userProgramId, programDay])
+}
+
+model AnalyticsEvent {
+  id             String             @id @default(uuid()) @db.Uuid
+  userId         String             @db.Uuid
+  programId      String?            @db.Uuid
+  programMissionId String?          @db.Uuid
+  userProgramId  String?            @db.Uuid
+  eventType      AnalyticsEventType
+  programDay     Int?
+  localDate      String?
+  payload        Json
+  createdAt      DateTime           @default(now())
+  user           User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  program        Program?           @relation(fields: [programId], references: [id], onDelete: SetNull)
+  programMission ProgramMission?    @relation(fields: [programMissionId], references: [id], onDelete: SetNull)
+  userProgram    UserProgram?       @relation(fields: [userProgramId], references: [id], onDelete: SetNull)
+
+  @@index([userId, eventType, localDate])
+  @@index([userProgramId, eventType, localDate])
+}
+
+model ProgramInterest {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @db.Uuid
+  programId String   @db.Uuid
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  program   Program  @relation(fields: [programId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, programId])
+  @@index([programId])
+}
+
+model ImpulseBlock {
+  id             String             @id @default(uuid()) @db.Uuid
+  userId         String             @db.Uuid
+  userProgramId  String             @db.Uuid
+  programId      String             @db.Uuid
+  localDate      String
+  blockIndex     Int
+  startTime      String
+  endTime        String
+  status         ImpulseBlockStatus
+  xpEarned       Int                @default(0)
+  completedCount Int                @default(0)
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+  actions        ImpulseAction[]
+  user           User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userProgram    UserProgram        @relation(fields: [userProgramId], references: [id], onDelete: Cascade)
+  program        Program            @relation(fields: [programId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, localDate, blockIndex])
+  @@index([userId, localDate])
+  @@index([localDate])
+}
+
+model ImpulseAction {
+  id             String              @id @default(uuid()) @db.Uuid
+  impulseBlockId String              @db.Uuid
+  taskId         String
+  taskText       String
+  category       String
+  antiSpamTag    String
+  status         ImpulseActionStatus
+  xpEarned       Int                 @default(0)
+  completedAt    DateTime?
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+  block          ImpulseBlock        @relation(fields: [impulseBlockId], references: [id], onDelete: Cascade)
+
+  @@unique([impulseBlockId, taskId])
+  @@index([impulseBlockId])
+}
+
+model UserSuggestion {
+  id        String           @id @default(uuid()) @db.Uuid
+  userId    String?          @db.Uuid
+  type      SuggestionType
+  message   String
+  email     String?
+  status    SuggestionStatus @default(NEW)
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
+  user      User?            @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([status])
+}
