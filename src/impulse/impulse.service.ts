@@ -1,5 +1,5 @@
 import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
-import { MissionStatus, Prisma, ProgramStatus } from '@prisma/client';
+import { ImpulseActionStatus as PrismaImpulseActionStatus, ImpulseBlockStatus as PrismaImpulseBlockStatus, MissionStatus, ProgramStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { ProgramSyncService } from '../program-sync/program-sync.service';
 import { CompleteImpulseActionDto } from './dto/complete-impulse-action.dto';
@@ -169,139 +169,81 @@ export class ImpulseService {
     const minutes = this.parseTimeToMinutes(dto.currentTime);
 
     await this.prisma.$transaction(async (tx) => {
-      const [action] = await tx.$queryRaw<
-        Array<
-          RawImpulseAction & {
-            blockUserId: string;
-            blockLocalDate: string;
-            blockIndex: number;
-            blockStatus: ImpulseBlockStatus;
-            blockCompletedCount: number;
-            blockXpEarned: number;
-          }
-        >
-      >`
-        SELECT
-          ia."id",
-          ia."impulseBlockId",
-          ia."taskId",
-          ia."taskText",
-          ia."category",
-          ia."antiSpamTag",
-          ia."status",
-          ia."xpEarned",
-          ib."userId" as "blockUserId",
-          ib."localDate" as "blockLocalDate",
-          ib."blockIndex",
-          ib."status" as "blockStatus",
-          ib."completedCount" as "blockCompletedCount",
-          ib."xpEarned" as "blockXpEarned"
-        FROM "ImpulseAction" ia
-        INNER JOIN "ImpulseBlock" ib ON ib."id" = ia."impulseBlockId"
-        WHERE ia."id" = ${actionId}::uuid
-        LIMIT 1
-      `;
+      const action = await tx.impulseAction.findUnique({
+        where: { id: actionId },
+        include: { block: true }
+      });
 
-      if (!action || action.blockUserId !== userId) {
+      if (!action || action.block.userId !== userId) {
         throw new NotFoundException('Impulse action not found');
       }
 
-      if (action.blockLocalDate !== dto.localDate) {
+      if (action.block.localDate !== dto.localDate) {
         throw new ConflictException('Impulse block does not match local date');
       }
 
-      const blockDefinition = IMPULSE_BLOCKS.find((block) => block.blockIndex === action.blockIndex);
+      const blockDefinition = IMPULSE_BLOCKS.find((block) => block.blockIndex === action.block.blockIndex);
       if (!blockDefinition || !this.isTimeInsideBlock(minutes, blockDefinition)) {
         throw new ConflictException('Impulse block is not active');
       }
 
-      if (action.blockStatus !== 'ACTIVE') {
+      if (action.block.status !== PrismaImpulseBlockStatus.ACTIVE) {
         throw new ConflictException('Impulse block is closed');
       }
 
-      if (action.status !== 'AVAILABLE') {
+      if (action.status !== PrismaImpulseActionStatus.AVAILABLE) {
         throw new ConflictException('Impulse action already completed');
       }
 
-      if (action.blockCompletedCount >= 5 || action.blockXpEarned >= 12) {
+      if (action.block.completedCount >= 5 || action.block.xpEarned >= 12) {
         throw new ConflictException('Impulse block is already complete');
       }
 
-      const nextOrder = action.blockCompletedCount + 1;
+      const nextOrder = action.block.completedCount + 1;
       const xp = this.xpForOrder(nextOrder);
-      const nextCompletedCount = action.blockCompletedCount + 1;
-      const nextBlockXp = action.blockXpEarned + xp;
+      const nextCompletedCount = action.block.completedCount + 1;
+      const nextBlockXp = action.block.xpEarned + xp;
       const nextStatus: ImpulseBlockStatus =
         nextCompletedCount >= 5 || nextBlockXp >= 12 ? 'COMPLETED' : 'ACTIVE';
 
-      await tx.$executeRaw`
-        UPDATE "ImpulseAction"
-        SET
-          "status" = ${'COMPLETED'}::"ImpulseActionStatus",
-          "xpEarned" = ${xp},
-          "completedAt" = NOW(),
-          "updatedAt" = NOW()
-        WHERE "id" = ${action.id}::uuid
-      `;
+      await tx.impulseAction.update({
+        where: { id: action.id },
+        data: {
+          status: PrismaImpulseActionStatus.COMPLETED,
+          xpEarned: xp,
+          completedAt: new Date()
+        }
+      });
 
-      await tx.$executeRaw`
-        UPDATE "ImpulseBlock"
-        SET
-          "completedCount" = ${nextCompletedCount},
-          "xpEarned" = ${nextBlockXp},
-          "status" = ${nextStatus}::"ImpulseBlockStatus",
-          "updatedAt" = NOW()
-        WHERE "id" = ${action.impulseBlockId}::uuid
-      `;
+      await tx.impulseBlock.update({
+        where: { id: action.block.id },
+        data: {
+          completedCount: nextCompletedCount,
+          xpEarned: nextBlockXp,
+          status: nextStatus as PrismaImpulseBlockStatus
+        }
+      });
     });
 
     return this.getToday(userId, dto);
   }
 
   private async getHydratedBlocks(userId: string, userProgramId: string, localDate: string): Promise<HydratedImpulseBlock[]> {
-    const blocks = await this.prisma.$queryRaw<RawImpulseBlock[]>`
-      SELECT
-        "id",
-        "userId",
-        "userProgramId",
-        "programId",
-        "localDate",
-        "blockIndex",
-        "startTime",
-        "endTime",
-        "status",
-        "xpEarned",
-        "completedCount"
-      FROM "ImpulseBlock"
-      WHERE "userId" = ${userId}::uuid
-        AND "userProgramId" = ${userProgramId}::uuid
-        AND "localDate" = ${localDate}
-      ORDER BY "blockIndex" ASC
-    `;
+    const blocks = await this.prisma.impulseBlock.findMany({
+      where: {
+        userId,
+        userProgramId,
+        localDate
+      },
+      include: {
+        actions: {
+          orderBy: { createdAt: 'asc' }
+        }
+      },
+      orderBy: { blockIndex: 'asc' }
+    });
 
-    if (!blocks.length) {
-      return [];
-    }
-
-    const actions = await this.prisma.$queryRaw<RawImpulseAction[]>`
-      SELECT
-        "id",
-        "impulseBlockId",
-        "taskId",
-        "taskText",
-        "category",
-        "antiSpamTag",
-        "status",
-        "xpEarned"
-      FROM "ImpulseAction"
-      WHERE "impulseBlockId" IN (${Prisma.join(blocks.map((block) => Prisma.sql`${block.id}::uuid`))})
-      ORDER BY "createdAt" ASC
-    `;
-
-    return blocks.map((block) => ({
-      ...block,
-      actions: actions.filter((action) => action.impulseBlockId === block.id)
-    }));
+    return blocks.map((block) => this.mapHydratedBlock(block));
   }
 
   private async createBlockForCurrentWindow(
@@ -314,97 +256,65 @@ export class ImpulseService {
     const selection = await this.buildBlockSelection(userId, userProgramId, localDate);
 
     return this.prisma.$transaction(async (tx) => {
-      const [block] = await tx.$queryRaw<RawImpulseBlock[]>`
-        INSERT INTO "ImpulseBlock" (
-          "userId",
-          "userProgramId",
-          "programId",
-          "localDate",
-          "blockIndex",
-          "startTime",
-          "endTime",
-          "status",
-          "xpEarned",
-          "completedCount"
-        )
-        VALUES (
-          ${userId}::uuid,
-          ${userProgramId}::uuid,
-          ${programId}::uuid,
-          ${localDate},
-          ${blockDefinition.blockIndex},
-          ${blockDefinition.startTime},
-          ${blockDefinition.endTime},
-          ${'ACTIVE'}::"ImpulseBlockStatus",
-          0,
-          0
-        )
-        RETURNING
-          "id",
-          "userId",
-          "userProgramId",
-          "programId",
-          "localDate",
-          "blockIndex",
-          "startTime",
-          "endTime",
-          "status",
-          "xpEarned",
-          "completedCount"
-      `;
+      const block = await tx.impulseBlock.create({
+        data: {
+          userId,
+          userProgramId,
+          programId,
+          localDate,
+          blockIndex: blockDefinition.blockIndex,
+          startTime: blockDefinition.startTime,
+          endTime: blockDefinition.endTime,
+          status: PrismaImpulseBlockStatus.ACTIVE,
+          xpEarned: 0,
+          completedCount: 0
+        }
+      });
 
-      for (const task of selection) {
-        await tx.$executeRaw`
-          INSERT INTO "ImpulseAction" (
-            "impulseBlockId",
-            "taskId",
-            "taskText",
-            "category",
-            "antiSpamTag",
-            "status",
-            "xpEarned"
-          )
-          VALUES (
-            ${block.id}::uuid,
-            ${task.id},
-            ${task.text},
-            ${task.category},
-            ${task.antiSpamTag},
-            ${'AVAILABLE'}::"ImpulseActionStatus",
-            0
-          )
-        `;
+      await tx.impulseAction.createMany({
+        data: selection.map((task) => ({
+          impulseBlockId: block.id,
+          taskId: task.id,
+          taskText: task.text,
+          category: task.category,
+          antiSpamTag: task.antiSpamTag,
+          status: PrismaImpulseActionStatus.AVAILABLE,
+          xpEarned: 0
+        }))
+      });
+
+      const hydratedBlock = await tx.impulseBlock.findUnique({
+        where: { id: block.id },
+        include: {
+          actions: {
+            orderBy: { createdAt: 'asc' }
+          }
+        }
+      });
+
+      if (!hydratedBlock) {
+        throw new ConflictException('Unable to load impulse block');
       }
 
-      const actions = await tx.$queryRaw<RawImpulseAction[]>`
-        SELECT
-          "id",
-          "impulseBlockId",
-          "taskId",
-          "taskText",
-          "category",
-          "antiSpamTag",
-          "status",
-          "xpEarned"
-        FROM "ImpulseAction"
-        WHERE "impulseBlockId" = ${block.id}::uuid
-        ORDER BY "createdAt" ASC
-      `;
-
-      return { ...block, actions };
+      return this.mapHydratedBlock(hydratedBlock);
     });
   }
 
   private async buildBlockSelection(userId: string, userProgramId: string, localDate: string) {
-    const previousCompletedActions = await this.prisma.$queryRaw<Array<{ taskId: string; antiSpamTag: string }>>`
-      SELECT ia."taskId", ia."antiSpamTag"
-      FROM "ImpulseAction" ia
-      INNER JOIN "ImpulseBlock" ib ON ib."id" = ia."impulseBlockId"
-      WHERE ib."userId" = ${userId}::uuid
-        AND ib."userProgramId" = ${userProgramId}::uuid
-        AND ib."localDate" = ${localDate}
-        AND ia."status" = ${'COMPLETED'}::"ImpulseActionStatus"
-    `;
+    const previousCompletedActions = await this.prisma.impulseAction.findMany({
+      where: {
+        status: PrismaImpulseActionStatus.COMPLETED,
+        block: {
+          userId,
+          userProgramId,
+          localDate
+        }
+      },
+      select: {
+        taskId: true,
+        antiSpamTag: true
+      }
+    });
 
     const completedTaskIds = new Set<string>(previousCompletedActions.map((action) => action.taskId));
     const usedTodayTags = new Set<string>(previousCompletedActions.map((action) => action.antiSpamTag));
@@ -546,19 +456,18 @@ export class ImpulseService {
       return;
     }
 
-    for (const blockIndex of elapsedIndices) {
-      await this.prisma.$executeRaw`
-        UPDATE "ImpulseBlock"
-        SET
-          "status" = ${'MISSED'}::"ImpulseBlockStatus",
-          "updatedAt" = NOW()
-        WHERE "userId" = ${userId}::uuid
-          AND "userProgramId" = ${userProgramId}::uuid
-          AND "localDate" = ${localDate}
-          AND "blockIndex" = ${blockIndex}
-          AND "status" = ${'ACTIVE'}::"ImpulseBlockStatus"
-      `;
-    }
+    await this.prisma.impulseBlock.updateMany({
+      where: {
+        userId,
+        userProgramId,
+        localDate,
+        blockIndex: { in: elapsedIndices },
+        status: PrismaImpulseBlockStatus.ACTIVE
+      },
+      data: {
+        status: PrismaImpulseBlockStatus.MISSED
+      }
+    });
   }
 
   private buildDailySummary(blocks: HydratedImpulseBlock[]) {
@@ -599,6 +508,54 @@ export class ImpulseService {
       blockIndex: block.blockIndex,
       startTime: block.startTime,
       endTime: block.endTime
+    };
+  }
+
+  private mapHydratedBlock(block: {
+    id: string;
+    userId: string;
+    userProgramId: string;
+    programId: string;
+    localDate: string;
+    blockIndex: number;
+    startTime: string;
+    endTime: string;
+    status: PrismaImpulseBlockStatus;
+    xpEarned: number;
+    completedCount: number;
+    actions: Array<{
+      id: string;
+      impulseBlockId: string;
+      taskId: string;
+      taskText: string;
+      category: string;
+      antiSpamTag: string;
+      status: PrismaImpulseActionStatus;
+      xpEarned: number;
+    }>;
+  }): HydratedImpulseBlock {
+    return {
+      id: block.id,
+      userId: block.userId,
+      userProgramId: block.userProgramId,
+      programId: block.programId,
+      localDate: block.localDate,
+      blockIndex: block.blockIndex,
+      startTime: block.startTime,
+      endTime: block.endTime,
+      status: block.status,
+      xpEarned: block.xpEarned,
+      completedCount: block.completedCount,
+      actions: block.actions.map((action) => ({
+        id: action.id,
+        impulseBlockId: action.impulseBlockId,
+        taskId: action.taskId,
+        taskText: action.taskText,
+        category: action.category,
+        antiSpamTag: action.antiSpamTag,
+        status: action.status,
+        xpEarned: action.xpEarned
+      }))
     };
   }
 
